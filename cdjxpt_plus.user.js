@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         cdjxpt_plus
 // @namespace    cdjxpt-auto
-// @version      0.3.3
+// @version      0.3.5
 // @description  报表助手：搬运图片、清空建设节点、删除所有照片、下载全部图片（统一命名）
 // @match        https://www.cdjxpt.cn/gyjjddpt/qsmzq-web/*
 // @run-at       document-idle
@@ -11,7 +11,7 @@
   'use strict';
 
   const CFG_KEY = 'cdjxpt_auto_cfg_v2';
-  const SCRIPT_VERSION = '0.3.3';
+  const SCRIPT_VERSION = '0.3.5';
   const DEFAULT_SAVE_API = 'https://www.cdjxpt.cn/iis/situation/saveSituation.json';
   const DEFAULT_DETAIL_API = 'https://www.cdjxpt.cn/iis/situation/editSituation.json';
   const SITUATION_LIST_KEYS = [
@@ -627,6 +627,84 @@
     };
   }
 
+  function buildPhotoMapsFromList(list) {
+    const byKey = new Map();
+    const bySecondaryKey = new Map();
+    const byName = new Map();
+    const byProjectCompanyKey = new Map();
+
+    (Array.isArray(list) ? list : []).forEach((it, idx) => {
+      const photos = getPhotoAdjuncts(it);
+      if (!photos.length) return;
+      const photoClone = clone(photos);
+
+      const key = getItemKey(it);
+      if (key && !byKey.has(key)) byKey.set(key, photoClone);
+
+      const projectCompanyKey = getProjectCompanyKey(it, idx);
+      if (projectCompanyKey && !byProjectCompanyKey.has(projectCompanyKey)) byProjectCompanyKey.set(projectCompanyKey, photoClone);
+
+      const nameKey = normalizeText(getProjectName(it, idx));
+      if (nameKey && !byName.has(nameKey)) byName.set(nameKey, photoClone);
+
+      getItemSecondaryMatchKeys(it).forEach((k) => {
+        if (k && !bySecondaryKey.has(k)) bySecondaryKey.set(k, photoClone);
+      });
+    });
+
+    return {
+      byKey,
+      bySecondaryKey,
+      byName,
+      byProjectCompanyKey,
+    };
+  }
+
+  function pickPhotosFromMaps(maps, item, idx) {
+    const key = getItemKey(item);
+    const byKey = key ? maps.byKey.get(key) : null;
+    if (byKey && byKey.length) return byKey;
+
+    const byProjectCompany = maps.byProjectCompanyKey.get(getProjectCompanyKey(item, idx));
+    if (byProjectCompany && byProjectCompany.length) return byProjectCompany;
+
+    const byName = maps.byName.get(normalizeText(getProjectName(item, idx)));
+    if (byName && byName.length) return byName;
+
+    const bySecondary = getItemSecondaryMatchKeys(item).map((k) => maps.bySecondaryKey.get(k)).find(Boolean) || null;
+    if (bySecondary && bySecondary.length) return bySecondary;
+
+    return null;
+  }
+
+  function syncPhotosToAllPayloadLists(payload, primaryList) {
+    const refs = collectSituationListRefs(payload);
+    if (!refs.length || !Array.isArray(primaryList)) {
+      return { touchedLists: 0, syncedItems: 0 };
+    }
+
+    const maps = buildPhotoMapsFromList(primaryList);
+    let touchedLists = 0;
+    let syncedItems = 0;
+
+    refs.forEach((ref) => {
+      const list = ref?.list;
+      if (!Array.isArray(list) || list === primaryList) return;
+      touchedLists += 1;
+
+      for (let i = 0; i < list.length; i++) {
+        const item = list[i];
+        const picked = pickPhotosFromMaps(maps, item, i);
+        if (!picked || !picked.length) continue;
+        const { other } = splitAdjunctsByImage(getAdjuncts(item));
+        item.adjuncts = other.concat(clone(picked));
+        syncedItems += 1;
+      }
+    });
+
+    return { touchedLists, syncedItems };
+  }
+
   function extractReportIdentity(detail, ctx) {
     const obj = detail?.obj || {};
     const extra = detail?.extraData || {};
@@ -1090,12 +1168,9 @@
     let copied = 0;
     let photoSkipped = 0;
     let fallbackCopied = 0;
-    const copiedNames = [];
-    const skippedNames = [];
 
     for (let i = 0; i < list.length; i++) {
       const item = list[i];
-      const projectName = getProjectName(item, i);
 
       const key = getItemKey(item);
       const byKey = key ? sourceMaps.byKey.get(key) : null;
@@ -1115,17 +1190,17 @@
         const { other } = splitAdjunctsByImage(getAdjuncts(item));
         item.adjuncts = other.concat(clone(picked));
         copied += 1;
-        copiedNames.push(projectName);
       } else {
         // 未匹配到源图片时，不改当前项目图片，避免误清空
         photoSkipped += 1;
-        skippedNames.push(projectName);
       }
     }
 
     if (copied === 0 && sourceMaps.photoProjectCount > 0) {
       throw new Error(`未匹配到可搬运图片。源有图项目 ${sourceMaps.photoProjectCount}，目标项目 ${list.length}。请确认源 dataId/报表期是否正确`);
     }
+
+    const syncInfo = syncPhotosToAllPayloadLists(payload, list);
 
     setStatus('正在保存照片...');
     await apiSave({ saveApi, payload });
@@ -1159,14 +1234,7 @@
     const parts = [];
     parts.push(`照片迁移完成：${copied} 项，未匹配保留：${photoSkipped} 项，源有图项目：${sourceMaps.photoProjectCount}`);
     parts.push(`匹配策略：主键优先，降级匹配 ${fallbackCopied} 项`);
-    if (copiedNames.length > 0) {
-      const demo = copiedNames.slice(0, 8).join('、');
-      parts.push(`已搬运示例：${demo}${copiedNames.length > 8 ? ' 等' : ''}`);
-    }
-    if (skippedNames.length > 0) {
-      const demo = skippedNames.slice(0, 6).join('、');
-      parts.push(`未搬运示例：${demo}${skippedNames.length > 6 ? ' 等' : ''}`);
-    }
+    if (syncInfo.touchedLists > 0) parts.push(`多列表同步：覆盖 ${syncInfo.touchedLists} 个列表，共同步 ${syncInfo.syncedItems} 项`);
     if (sourceFetchFallback) parts.push('源数据获取：已走页面抓取降级模式');
     if (sourceFetchFallback && sourceFetchNote) parts.push(`详情接口提示：${sourceFetchNote}`);
     if (doClearNodes) parts.push(`节点清空：模拟点击垃圾桶 ${uiClickCount} 次`);
@@ -1178,7 +1246,7 @@
     } else {
       parts.push(`校验：当前有照片项目 ${finalVerifyPhotoCount}`);
     }
-    parts.push('提示：图片已写入后台，当前页面不一定实时显示，请手动刷新页面后查看');
+    parts.push('页面将自动刷新，以显示最新图片');
 
     if (doClearNodes && remainingUiCount > 0) {
       const failReason = `清空校验失败：仍有 ${remainingUiCount} 个节点待删`;
@@ -1190,6 +1258,10 @@
 
     setStatus(parts.join(' | '));
     alert(parts.join('\n'));
+    if (!doClearNodes) {
+      setStatus('正在刷新页面显示最新图片...');
+      location.reload();
+    }
   }
 
   async function downloadAllImages() {

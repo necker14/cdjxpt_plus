@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         cdjxpt_plus
 // @namespace    cdjxpt-auto
-// @version      0.3.7
-// @description  报表助手：搬运图片、清空建设节点、删除所有照片、下载全部图片（统一命名）
+// @version      0.3.8
+// @description  报表助手：搬运图片、清空建设节点、删除所有照片、导出全部图片（统一命名）
 // @match        https://www.cdjxpt.cn/gyjjddpt/qsmzq-web/*
 // @run-at       document-idle
 // ==/UserScript==
@@ -11,7 +11,7 @@
   'use strict';
 
   const CFG_KEY = 'cdjxpt_auto_cfg_v2';
-  const SCRIPT_VERSION = '0.3.7';
+  const SCRIPT_VERSION = '0.3.8';
   const DEFAULT_SAVE_API = 'https://www.cdjxpt.cn/iis/situation/saveSituation.json';
   const DEFAULT_DETAIL_API = 'https://www.cdjxpt.cn/iis/situation/editSituation.json';
   const SITUATION_LIST_KEYS = [
@@ -45,6 +45,10 @@
     'picture',
   ];
   const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'bmp', 'gif', 'tif', 'tiff', 'webp']);
+  const JSZIP_CDN_URLS = [
+    'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',
+    'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js',
+  ];
 
   if (!location.hash.includes('/formFill/')) return;
 
@@ -52,6 +56,7 @@
   const clone = (v) => JSON.parse(JSON.stringify(v));
 
   let running = false;
+  let jsZipLoader = null;
 
   function parseHashQuery() {
     const h = location.hash || '';
@@ -396,6 +401,36 @@
       .replace(/[\\/:*?"<>|]/g, '_')
       .replace(/\s+/g, ' ')
       .trim();
+  }
+
+  function loadScriptByUrl(url) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = url;
+      s.async = true;
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error(`script load failed: ${url}`));
+      document.head.appendChild(s);
+    });
+  }
+
+  async function ensureJSZip() {
+    if (window.JSZip) return window.JSZip;
+    if (!jsZipLoader) {
+      jsZipLoader = (async () => {
+        let lastErr = null;
+        for (const url of JSZIP_CDN_URLS) {
+          try {
+            await loadScriptByUrl(url);
+            if (window.JSZip) return window.JSZip;
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+        throw lastErr || new Error('JSZip load failed');
+      })();
+    }
+    return jsZipLoader;
   }
 
   function normalizeText(v) {
@@ -1408,12 +1443,14 @@
     });
 
     if (!tasks.length) {
-      setStatus('当前报表没有可下载图片');
-      alert('当前报表没有可下载图片');
+      setStatus('当前报表没有可导出图片');
+      alert('当前报表没有可导出图片');
       return;
     }
 
-    setStatus(`开始下载，共 ${tasks.length} 张...`);
+    setStatus(`正在准备压缩包，共 ${tasks.length} 张图片...`);
+    const JSZip = await ensureJSZip();
+    const zip = new JSZip();
 
     const usedNames = new Map();
     let ok = 0;
@@ -1438,24 +1475,40 @@
         const resp = await fetch(t.url, { credentials: 'include' });
         if (!resp.ok) throw new Error(String(resp.status));
         const blob = await resp.blob();
-        const a = document.createElement('a');
-        const blobUrl = URL.createObjectURL(blob);
-        a.href = blobUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(blobUrl);
+        zip.file(filename, blob);
         ok += 1;
       } catch (e) {
         fail += 1;
       }
 
-      setStatus(`下载中 ${i + 1}/${tasks.length}...`);
+      setStatus(`正在打包 ${i + 1}/${tasks.length}...`);
       await sleep(120);
     }
 
-    const msg = `下载完成：成功 ${ok}，失败 ${fail}`;
+    if (!ok) {
+      const msg = `导出失败：${tasks.length} 张图片都下载失败`;
+      setStatus(msg, true);
+      alert(msg);
+      return;
+    }
+
+    setStatus('正在生成压缩包...');
+    const zipBlob = await zip.generateAsync({
+      type: 'blob',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 },
+    });
+    const zipName = `${reportName}-${reportPeriod}-图片.zip`;
+    const a = document.createElement('a');
+    const blobUrl = URL.createObjectURL(zipBlob);
+    a.href = blobUrl;
+    a.download = zipName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(blobUrl);
+
+    const msg = `导出完成：成功 ${ok} 张，失败 ${fail} 张，已下载压缩包`;
     setStatus(msg, fail > 0);
     alert(msg);
   }
@@ -1532,7 +1585,7 @@
         <button id="cdjxpt-copy-photo" style="padding:4px 8px;">搬运照片</button>
         <button id="cdjxpt-clear-node" style="padding:4px 8px;">清空建设节点</button>
         <button id="cdjxpt-delete-photos" style="padding:4px 8px;">删除所有照片</button>
-        <button id="cdjxpt-download-images" style="padding:4px 8px;">下载所有图片</button>
+        <button id="cdjxpt-download-images" style="padding:4px 8px;">导出所有图片</button>
       </div>
       <div id="cdjxpt-auto-status" style="margin-top:8px;color:#0f5132;word-break:break-word;">待命</div>
       <div style="margin-top:6px;color:#6e7781;">说明：会校验路由/报表身份，避免不同报表串写。</div>
@@ -1618,7 +1671,7 @@
         } catch (e) {
           console.error(e);
           setStatus(String(e.message || e), true);
-          alert(`下载失败：${e.message || e}`);
+          alert(`导出失败：${e.message || e}`);
         }
       });
     });

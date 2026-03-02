@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         cdjxpt_plus
 // @namespace    cdjxpt-auto
-// @version      0.3.1
+// @version      0.3.2
 // @description  报表助手：搬运图片、清空建设节点、删除所有照片、下载全部图片（统一命名）
 // @match        https://www.cdjxpt.cn/gyjjddpt/qsmzq-web/*
 // @run-at       document-idle
@@ -11,7 +11,7 @@
   'use strict';
 
   const CFG_KEY = 'cdjxpt_auto_cfg_v2';
-  const SCRIPT_VERSION = '0.3.1';
+  const SCRIPT_VERSION = '0.3.2';
   const DEFAULT_SAVE_API = 'https://www.cdjxpt.cn/iis/situation/saveSituation.json';
   const DEFAULT_DETAIL_API = 'https://www.cdjxpt.cn/iis/situation/editSituation.json';
   const SITUATION_LIST_KEYS = [

@@ -397,9 +397,8 @@
     return pickString(item, ['baseInfoId', 'baseInfoID', 'projectId', 'id']);
   }
 
-  function getItemMatchKeys(item) {
+  function getItemSecondaryMatchKeys(item) {
     const keys = [
-      pickString(item, ['baseInfoId', 'baseInfoID', 'projectId', 'id']),
       pickString(item, ['mainMonitorCode', 'mainCode', 'monitorCode']),
       pickString(item, ['mainMonitorCodeName']),
       pickString(item, ['projectCode', 'investCode']),
@@ -419,7 +418,7 @@
     return v || `项目${fallbackIndex + 1}`;
   }
 
-  function getCompanyName(item) {
+  function getCompanyNameRaw(item) {
     const v = pickString(item, [
       'companyName',
       'enterpriseName',
@@ -431,7 +430,19 @@
       'orgName',
       'company',
     ]);
+    return v || '';
+  }
+
+  function getCompanyName(item) {
+    const v = getCompanyNameRaw(item);
     return v || '未知公司';
+  }
+
+  function getProjectCompanyKey(item, fallbackIndex) {
+    const projectKey = normalizeText(getProjectName(item, fallbackIndex));
+    const companyKey = normalizeText(getCompanyNameRaw(item));
+    if (!projectKey || !companyKey) return '';
+    return `${projectKey}@@${companyKey}`;
   }
 
   function getAdjuncts(item) {
@@ -553,26 +564,67 @@
     return 'jpg';
   }
 
+  function addUniqueAdjunctMapEntry(countMap, valueMap, key, adjuncts) {
+    if (!key) return;
+    countMap.set(key, (countMap.get(key) || 0) + 1);
+    if (!valueMap.has(key)) valueMap.set(key, clone(adjuncts));
+  }
+
+  function finalizeUniqueAdjunctMap(countMap, valueMap) {
+    const out = new Map();
+    let collisionCount = 0;
+    countMap.forEach((count, key) => {
+      if (count === 1) out.set(key, valueMap.get(key));
+      else collisionCount += 1;
+    });
+    return { map: out, collisionCount };
+  }
+
   function buildSourceMaps(sourceObj) {
     const list = extractSituationList(sourceObj);
-    const byKey = new Map();
-    const byMatchKey = new Map();
-    const byName = new Map();
+    const allProjectKeys = new Set();
+    const keyCountMap = new Map();
+    const keyValueMap = new Map();
+    const secondaryCountMap = new Map();
+    const secondaryValueMap = new Map();
+    const nameCountMap = new Map();
+    const nameValueMap = new Map();
+    const projectCompanyCountMap = new Map();
+    const projectCompanyValueMap = new Map();
     let photoProjectCount = 0;
 
     list.forEach((it, idx) => {
+      const key = getItemKey(it);
+      if (key) allProjectKeys.add(key);
+
       const adjuncts = getPhotoAdjuncts(it);
       if (!adjuncts.length) return;
       photoProjectCount += 1;
-      const key = getItemKey(it);
-      const matchKeys = getItemMatchKeys(it);
-      const name = getProjectName(it, idx);
-      if (key) byKey.set(key, clone(adjuncts));
-      matchKeys.forEach((k) => byMatchKey.set(k, clone(adjuncts)));
-      if (name) byName.set(normalizeText(name), clone(adjuncts));
+      addUniqueAdjunctMapEntry(keyCountMap, keyValueMap, key, adjuncts);
+      getItemSecondaryMatchKeys(it).forEach((k) => addUniqueAdjunctMapEntry(secondaryCountMap, secondaryValueMap, k, adjuncts));
+      addUniqueAdjunctMapEntry(nameCountMap, nameValueMap, normalizeText(getProjectName(it, idx)), adjuncts);
+      addUniqueAdjunctMapEntry(projectCompanyCountMap, projectCompanyValueMap, getProjectCompanyKey(it, idx), adjuncts);
     });
 
-    return { byKey, byMatchKey, byName, photoProjectCount };
+    const { map: byKey, collisionCount: keyCollisionCount } = finalizeUniqueAdjunctMap(keyCountMap, keyValueMap);
+    const { map: bySecondaryKey, collisionCount: secondaryCollisionCount } = finalizeUniqueAdjunctMap(secondaryCountMap, secondaryValueMap);
+    const { map: byName, collisionCount: nameCollisionCount } = finalizeUniqueAdjunctMap(nameCountMap, nameValueMap);
+    const { map: byProjectCompanyKey, collisionCount: projectCompanyCollisionCount } = finalizeUniqueAdjunctMap(projectCompanyCountMap, projectCompanyValueMap);
+
+    return {
+      allProjectKeys,
+      byKey,
+      bySecondaryKey,
+      byName,
+      byProjectCompanyKey,
+      photoProjectCount,
+      collisions: {
+        key: keyCollisionCount,
+        secondary: secondaryCollisionCount,
+        name: nameCollisionCount,
+        projectCompany: projectCompanyCollisionCount,
+      },
+    };
   }
 
   function extractReportIdentity(detail, ctx) {
@@ -984,7 +1036,15 @@
 
     const sourceCtx = { ...ctx, routeKey: cfg.sourceRouteKey || ctx.routeKey };
     let expectedLen = 0;
-    let sourceMaps = { byKey: new Map(), byMatchKey: new Map(), byName: new Map(), photoProjectCount: 0 };
+    let sourceMaps = {
+      allProjectKeys: new Set(),
+      byKey: new Map(),
+      bySecondaryKey: new Map(),
+      byName: new Map(),
+      byProjectCompanyKey: new Map(),
+      photoProjectCount: 0,
+      collisions: { key: 0, secondary: 0, name: 0, projectCompany: 0 },
+    };
     let sourceFetchFallback = false;
     let sourceFetchNote = '';
 
@@ -1029,16 +1089,24 @@
 
     let copied = 0;
     let photoSkipped = 0;
+    let fallbackCopied = 0;
 
     for (let i = 0; i < list.length; i++) {
       const item = list[i];
 
       const key = getItemKey(item);
       const byKey = key ? sourceMaps.byKey.get(key) : null;
-      const matchKeys = getItemMatchKeys(item);
-      const byMatch = matchKeys.map((k) => sourceMaps.byMatchKey.get(k)).find(Boolean) || null;
-      const byName = sourceMaps.byName.get(normalizeText(getProjectName(item, i)));
-      const picked = byKey || byMatch || byName || null;
+      const keyKnownInSource = !!(key && sourceMaps.allProjectKeys.has(key));
+      let picked = byKey || null;
+
+      // 主键存在且在源表可识别时，严格按主键处理；源无图则不降级，避免错配照片。
+      if (!picked && !keyKnownInSource) {
+        const byProjectCompany = sourceMaps.byProjectCompanyKey.get(getProjectCompanyKey(item, i));
+        const byName = sourceMaps.byName.get(normalizeText(getProjectName(item, i)));
+        const bySecondary = getItemSecondaryMatchKeys(item).map((k) => sourceMaps.bySecondaryKey.get(k)).find(Boolean) || null;
+        picked = byProjectCompany || byName || bySecondary || null;
+        if (picked) fallbackCopied += 1;
+      }
 
       if (picked && picked.length > 0) {
         const { other } = splitAdjunctsByImage(getAdjuncts(item));
@@ -1085,6 +1153,7 @@
 
     const parts = [];
     parts.push(`照片迁移完成：${copied} 项，未匹配保留：${photoSkipped} 项，源有图项目：${sourceMaps.photoProjectCount}`);
+    parts.push(`匹配策略：主键优先，降级匹配 ${fallbackCopied} 项`);
     if (sourceFetchFallback) parts.push('源数据获取：已走页面抓取降级模式');
     if (sourceFetchFallback && sourceFetchNote) parts.push(`详情接口提示：${sourceFetchNote}`);
     if (doClearNodes) parts.push(`节点清空：模拟点击垃圾桶 ${uiClickCount} 次`);

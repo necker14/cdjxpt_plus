@@ -1,9 +1,15 @@
 // ==UserScript==
 // @name         cdjxpt_plus
 // @namespace    cdjxpt-auto
-// @version      0.3.8
+// @version      0.3.9
 // @description  报表助手：搬运图片、清空建设节点、删除所有照片、导出全部图片（统一命名）
 // @match        https://www.cdjxpt.cn/gyjjddpt/qsmzq-web/*
+// @grant        GM_xmlhttpRequest
+// @connect      cdnjs.cloudflare.com
+// @connect      cdn.jsdelivr.net
+// @connect      unpkg.com
+// @connect      cdn.bootcdn.net
+// @connect      cdn.staticfile.org
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -11,7 +17,7 @@
   'use strict';
 
   const CFG_KEY = 'cdjxpt_auto_cfg_v2';
-  const SCRIPT_VERSION = '0.3.8';
+  const SCRIPT_VERSION = '0.3.9';
   const DEFAULT_SAVE_API = 'https://www.cdjxpt.cn/iis/situation/saveSituation.json';
   const DEFAULT_DETAIL_API = 'https://www.cdjxpt.cn/iis/situation/editSituation.json';
   const SITUATION_LIST_KEYS = [
@@ -48,6 +54,9 @@
   const JSZIP_CDN_URLS = [
     'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',
     'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js',
+    'https://unpkg.com/jszip@3.10.1/dist/jszip.min.js',
+    'https://cdn.bootcdn.net/ajax/libs/jszip/3.10.1/jszip.min.js',
+    'https://cdn.staticfile.org/jszip/3.10.1/jszip.min.js',
   ];
 
   if (!location.hash.includes('/formFill/')) return;
@@ -414,6 +423,43 @@
     });
   }
 
+  function gmRequestText(url) {
+    return new Promise((resolve, reject) => {
+      if (typeof GM_xmlhttpRequest !== 'function') {
+        reject(new Error('GM_xmlhttpRequest unavailable'));
+        return;
+      }
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url,
+        timeout: 20000,
+        onload: (resp) => {
+          const status = Number(resp?.status || 0);
+          if (status >= 200 && status < 300 && resp.responseText) {
+            resolve(resp.responseText);
+          } else {
+            reject(new Error(`HTTP ${status || 'ERR'}`));
+          }
+        },
+        onerror: () => reject(new Error('network error')),
+        ontimeout: () => reject(new Error('request timeout')),
+      });
+    });
+  }
+
+  function loadJSZipByCode(code) {
+    const fn = new Function(`
+${code}
+return (typeof JSZip !== 'undefined'
+  ? JSZip
+  : (typeof globalThis !== 'undefined' ? globalThis.JSZip : undefined));
+`);
+    const lib = fn();
+    if (!lib) throw new Error('JSZip not found after eval');
+    try { window.JSZip = lib; } catch (_) {}
+    return lib;
+  }
+
   async function ensureJSZip() {
     if (window.JSZip) return window.JSZip;
     if (!jsZipLoader) {
@@ -427,7 +473,18 @@
             lastErr = e;
           }
         }
-        throw lastErr || new Error('JSZip load failed');
+
+        for (const url of JSZIP_CDN_URLS) {
+          try {
+            const code = await gmRequestText(url);
+            const lib = loadJSZipByCode(code);
+            if (lib) return lib;
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+
+        throw lastErr || new Error('压缩组件加载失败，请稍后重试');
       })();
     }
     return jsZipLoader;

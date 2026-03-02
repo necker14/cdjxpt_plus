@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         cdjxpt_plus
 // @namespace    cdjxpt-auto
-// @version      0.3.2
+// @version      0.3.3
 // @description  报表助手：搬运图片、清空建设节点、删除所有照片、下载全部图片（统一命名）
 // @match        https://www.cdjxpt.cn/gyjjddpt/qsmzq-web/*
 // @run-at       document-idle
@@ -11,7 +11,7 @@
   'use strict';
 
   const CFG_KEY = 'cdjxpt_auto_cfg_v2';
-  const SCRIPT_VERSION = '0.3.2';
+  const SCRIPT_VERSION = '0.3.3';
   const DEFAULT_SAVE_API = 'https://www.cdjxpt.cn/iis/situation/saveSituation.json';
   const DEFAULT_DETAIL_API = 'https://www.cdjxpt.cn/iis/situation/editSituation.json';
   const SITUATION_LIST_KEYS = [
@@ -1090,9 +1090,12 @@
     let copied = 0;
     let photoSkipped = 0;
     let fallbackCopied = 0;
+    const copiedNames = [];
+    const skippedNames = [];
 
     for (let i = 0; i < list.length; i++) {
       const item = list[i];
+      const projectName = getProjectName(item, i);
 
       const key = getItemKey(item);
       const byKey = key ? sourceMaps.byKey.get(key) : null;
@@ -1112,9 +1115,11 @@
         const { other } = splitAdjunctsByImage(getAdjuncts(item));
         item.adjuncts = other.concat(clone(picked));
         copied += 1;
+        copiedNames.push(projectName);
       } else {
         // 未匹配到源图片时，不改当前项目图片，避免误清空
         photoSkipped += 1;
+        skippedNames.push(projectName);
       }
     }
 
@@ -1154,6 +1159,14 @@
     const parts = [];
     parts.push(`照片迁移完成：${copied} 项，未匹配保留：${photoSkipped} 项，源有图项目：${sourceMaps.photoProjectCount}`);
     parts.push(`匹配策略：主键优先，降级匹配 ${fallbackCopied} 项`);
+    if (copiedNames.length > 0) {
+      const demo = copiedNames.slice(0, 8).join('、');
+      parts.push(`已搬运示例：${demo}${copiedNames.length > 8 ? ' 等' : ''}`);
+    }
+    if (skippedNames.length > 0) {
+      const demo = skippedNames.slice(0, 6).join('、');
+      parts.push(`未搬运示例：${demo}${skippedNames.length > 6 ? ' 等' : ''}`);
+    }
     if (sourceFetchFallback) parts.push('源数据获取：已走页面抓取降级模式');
     if (sourceFetchFallback && sourceFetchNote) parts.push(`详情接口提示：${sourceFetchNote}`);
     if (doClearNodes) parts.push(`节点清空：模拟点击垃圾桶 ${uiClickCount} 次`);
@@ -1165,6 +1178,7 @@
     } else {
       parts.push(`校验：当前有照片项目 ${finalVerifyPhotoCount}`);
     }
+    parts.push('提示：图片已写入后台，当前页面不一定实时显示，请手动刷新页面后查看');
 
     if (doClearNodes && remainingUiCount > 0) {
       const failReason = `清空校验失败：仍有 ${remainingUiCount} 个节点待删`;

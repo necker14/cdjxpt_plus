@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         cdjxpt_plus
 // @namespace    cdjxpt-auto
-// @version      0.3.5
+// @version      0.3.6
 // @description  报表助手：搬运图片、清空建设节点、删除所有照片、下载全部图片（统一命名）
 // @match        https://www.cdjxpt.cn/gyjjddpt/qsmzq-web/*
 // @run-at       document-idle
@@ -11,7 +11,7 @@
   'use strict';
 
   const CFG_KEY = 'cdjxpt_auto_cfg_v2';
-  const SCRIPT_VERSION = '0.3.5';
+  const SCRIPT_VERSION = '0.3.6';
   const DEFAULT_SAVE_API = 'https://www.cdjxpt.cn/iis/situation/saveSituation.json';
   const DEFAULT_DETAIL_API = 'https://www.cdjxpt.cn/iis/situation/editSituation.json';
   const SITUATION_LIST_KEYS = [
@@ -281,6 +281,95 @@
       await sleep(80);
       if (!clickedThisRound) break;
     }
+    return totalClicks;
+  }
+
+  function collectPhotoUploadItems() {
+    return Array.from(document.querySelectorAll('.ant-upload-list-item,.el-upload-list__item')).filter((item) => {
+      if (!isElementVisible(item)) return false;
+      const cls = String(item.className || '').toLowerCase();
+      if (cls.includes('upload-select') || cls.includes('upload-btn')) return false;
+      return !!(
+        item.querySelector('.ant-upload-list-item-thumbnail')
+        || item.querySelector('.el-upload-list__item-thumbnail')
+        || item.querySelector('img')
+      );
+    });
+  }
+
+  function findPhotoDeleteButtonInItem(item) {
+    if (!item) return null;
+
+    const candidates = Array.from(item.querySelectorAll('button,a,span,i')).filter((el) => {
+      const cls = String(el.className || '').toLowerCase();
+      const title = String(el.getAttribute?.('title') || '');
+      const aria = String(el.getAttribute?.('aria-label') || '');
+      const text = String(el.textContent || '').trim();
+      if (/(删除|delete|移除)/i.test(`${title} ${aria} ${text}`)) return true;
+      if (/(anticon-delete|el-icon-delete|icon-delete)/i.test(cls)) return true;
+      return text === '' || text === '🗑' || text === '🗑️';
+    });
+
+    if (candidates.length) {
+      const explicit = candidates.find((el) => {
+        const title = String(el.getAttribute?.('title') || '');
+        const aria = String(el.getAttribute?.('aria-label') || '');
+        const text = String(el.textContent || '').trim();
+        return /(删除|delete|移除)/i.test(`${title} ${aria} ${text}`);
+      });
+      return findNearestClickable(explicit || candidates[candidates.length - 1]);
+    }
+
+    const actionBtns = Array.from(item.querySelectorAll('.ant-upload-list-item-card-actions-btn, .el-icon-delete'));
+    if (!actionBtns.length) return null;
+    return findNearestClickable(actionBtns[actionBtns.length - 1]);
+  }
+
+  async function clearPhotosByUIClick() {
+    let totalClicks = 0;
+    let sameCountRounds = 0;
+    let lastCount = -1;
+
+    for (let round = 0; round < 40; round++) {
+      const items = collectPhotoUploadItems();
+      const count = items.length;
+      if (!count) break;
+
+      if (count === lastCount) sameCountRounds += 1;
+      else sameCountRounds = 0;
+      lastCount = count;
+      if (sameCountRounds >= 3) break;
+
+      let clickedThisRound = 0;
+      for (const item of items) {
+        if (!document.contains(item)) continue;
+        try {
+          item.scrollIntoView({ block: 'center', inline: 'center' });
+          item.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+          item.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+          await sleep(20);
+
+          const btn = findPhotoDeleteButtonInItem(item);
+          if (!btn) continue;
+          if ((btn).disabled) continue;
+
+          btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+          btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+          btn.click();
+
+          clickedThisRound += 1;
+          totalClicks += 1;
+          await sleep(60);
+
+          const confirmed = await clickDialogConfirmIfNeeded();
+          if (confirmed) await sleep(80);
+        } catch (_) {}
+      }
+
+      await sleep(120);
+      if (!clickedThisRound) break;
+    }
+
     return totalClicks;
   }
 
@@ -1359,58 +1448,36 @@
   async function deleteAllPhotos() {
     const ctx = getContext();
     if (ctx.type !== 'edit') throw new Error('请先进入“当月填报(edit)”页面再运行');
-    if (!ctx.dataId || !ctx.reportDate || !ctx.token) throw new Error('当前页面缺少 dataId/reportDate/token');
 
-    setStatus('正在准备保存模板...');
-    const { payload, saveApi } = await ensurePayloadTemplate();
-    const { detailApi } = resolveApis(ctx, saveApi);
-
-    setStatus('正在读取当前报表...');
-    const detail = await apiGetDetail({
-      detailApi,
-      dataId: ctx.dataId,
-      reportDate: ctx.reportDate,
-      token: ctx.token,
-      type: 'edit',
-    });
-
-    const targetList = extractSituationList(detail.obj);
-    const list = buildPayloadListRef(payload, targetList.length);
-
-    let clearedProjects = 0;
-    let clearedPhotos = 0;
-    for (const item of list) {
-      const allAdjuncts = getAdjuncts(item);
-      if (!allAdjuncts.length) continue;
-      const { photo, other } = splitAdjunctsByImage(allAdjuncts);
-      if (!photo.length) continue;
-      clearedProjects += 1;
-      clearedPhotos += photo.length;
-      item.adjuncts = other;
-    }
-
-    setStatus('正在保存...');
-    await apiSave({ saveApi, payload });
-
-    setStatus('正在回读校验...');
-    const verify = await apiGetDetail({
-      detailApi,
-      dataId: ctx.dataId,
-      reportDate: ctx.reportDate,
-      token: ctx.token,
-      type: 'edit',
-    });
-    const vList = extractSituationList(verify.obj);
-    const remainProjects = vList.filter((x) => getPhotoAdjuncts(x).length > 0).length;
-
-    const msg = `删除所有照片：已清空 ${clearedProjects} 个项目，共 ${clearedPhotos} 张 | 校验：剩余有照片项目 ${remainProjects}`;
-    if (remainProjects > 0) {
-      setStatus(msg, true);
-      alert(msg);
+    const beforeCount = collectPhotoUploadItems().length;
+    if (!beforeCount) {
+      setStatus('当前页面没有可删除照片');
+      alert('当前页面没有可删除照片');
       return;
     }
+
+    setStatus('正在删除所有照片...');
+    const clickCount = await clearPhotosByUIClick();
+    await sleep(300);
+    const remainCount = collectPhotoUploadItems().length;
+
+    const parts = [
+      `删除所有照片：初始 ${beforeCount} 张`,
+      `模拟点击删除 ${clickCount} 次`,
+      `校验：当前剩余 ${remainCount} 张`,
+      '请手动点击“存为草稿”完成保存',
+    ];
+
+    if (remainCount > 0) {
+      const msg = `${parts.join(' | ')} | 仍有照片未删`;
+      setStatus(msg, true);
+      alert(msg.replace(/\s\|\s/g, '\n'));
+      return;
+    }
+
+    const msg = parts.join(' | ');
     setStatus(msg);
-    alert(msg);
+    alert(msg.replace(/\s\|\s/g, '\n'));
   }
 
   function mountPanel() {

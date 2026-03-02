@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         cdjxpt_plus
 // @namespace    cdjxpt-auto
-// @version      0.3.6
+// @version      0.3.7
 // @description  报表助手：搬运图片、清空建设节点、删除所有照片、下载全部图片（统一命名）
 // @match        https://www.cdjxpt.cn/gyjjddpt/qsmzq-web/*
 // @run-at       document-idle
@@ -11,7 +11,7 @@
   'use strict';
 
   const CFG_KEY = 'cdjxpt_auto_cfg_v2';
-  const SCRIPT_VERSION = '0.3.6';
+  const SCRIPT_VERSION = '0.3.7';
   const DEFAULT_SAVE_API = 'https://www.cdjxpt.cn/iis/situation/saveSituation.json';
   const DEFAULT_DETAIL_API = 'https://www.cdjxpt.cn/iis/situation/editSituation.json';
   const SITUATION_LIST_KEYS = [
@@ -1320,33 +1320,48 @@
     }
     const remainingUiCount = doClearNodes ? collectNodeDeleteButtons().length : 0;
 
-    const parts = [];
-    parts.push(`照片迁移完成：${copied} 项，未匹配保留：${photoSkipped} 项，源有图项目：${sourceMaps.photoProjectCount}`);
-    parts.push(`匹配策略：主键优先，降级匹配 ${fallbackCopied} 项`);
-    if (syncInfo.touchedLists > 0) parts.push(`多列表同步：覆盖 ${syncInfo.touchedLists} 个列表，共同步 ${syncInfo.syncedItems} 项`);
-    if (sourceFetchFallback) parts.push('源数据获取：已走页面抓取降级模式');
-    if (sourceFetchFallback && sourceFetchNote) parts.push(`详情接口提示：${sourceFetchNote}`);
-    if (doClearNodes) parts.push(`节点清空：模拟点击垃圾桶 ${uiClickCount} 次`);
-    if (doClearNodes) parts.push(`校验：当前剩余节点 ${remainingUiCount} 个`);
-    if (doClearNodes) parts.push('请手动点击“存为草稿”完成节点保存');
-    if (verifyNote) {
-      parts.push(`校验：接口回读失败，请手动刷新确认（${verifyNote}）`);
-      parts.push(`参考：当前内存有照片项目 ${finalVerifyPhotoCount}`);
+    const statusParts = [];
+    statusParts.push(`照片迁移完成：已搬运 ${copied} 项，未匹配 ${photoSkipped} 项，源有图 ${sourceMaps.photoProjectCount} 项`);
+    statusParts.push(`匹配回退 ${fallbackCopied} 项`);
+    if (syncInfo.touchedLists > 0) statusParts.push(`多列表同步：${syncInfo.touchedLists} 列表，${syncInfo.syncedItems} 项`);
+    if (sourceFetchFallback) statusParts.push('源数据读取：备用模式');
+    if (verifyNote) statusParts.push(`校验失败：${verifyNote}`);
+    else statusParts.push(`校验：当前有照片项目 ${finalVerifyPhotoCount} 项`);
+    if (doClearNodes) statusParts.push(`节点清空：点击 ${uiClickCount} 次，剩余 ${remainingUiCount} 个`);
+
+    const userLines = [];
+    userLines.push('照片搬运已完成');
+    userLines.push(`已搬运：${copied} 个项目`);
+    userLines.push(`未匹配：${photoSkipped} 个项目（保持原样）`);
+    if (!verifyNote) {
+      userLines.push(`当前有图片的项目：${finalVerifyPhotoCount} 个`);
     } else {
-      parts.push(`校验：当前有照片项目 ${finalVerifyPhotoCount}`);
+      userLines.push('系统自动校验失败，请刷新页面后检查图片是否显示');
     }
-    parts.push('页面将自动刷新，以显示最新图片');
+    if (syncInfo.touchedLists > 0) {
+      userLines.push('已自动处理不同报表结构的数据同步');
+    }
+    if (sourceFetchFallback) {
+      userLines.push('已自动使用备用方式读取源报表');
+    }
+
+    if (doClearNodes) {
+      userLines.push(`建设节点删除：已点击 ${uiClickCount} 次，剩余 ${remainingUiCount} 个`);
+      userLines.push('建设节点不会自动保存，请手动点击“存为草稿”');
+    } else {
+      userLines.push('页面即将自动刷新，刷新后可直接看到最新图片');
+      userLines.push('如果还没显示，请手动再刷新一次页面');
+    }
 
     if (doClearNodes && remainingUiCount > 0) {
-      const failReason = `清空校验失败：仍有 ${remainingUiCount} 个节点待删`;
-      const failMsg = `${parts.join(' | ')} | ${failReason}`;
-      setStatus(failMsg, true);
-      alert(failMsg.replace(/\s\|\s/g, '\n'));
+      userLines.push('仍有建设节点未删完，可再点一次“清空建设节点”');
+      setStatus(statusParts.join(' | '), true);
+      alert(userLines.join('\n'));
       return;
     }
 
-    setStatus(parts.join(' | '));
-    alert(parts.join('\n'));
+    setStatus(statusParts.join(' | '));
+    alert(userLines.join('\n'));
     if (!doClearNodes) {
       setStatus('正在刷新页面显示最新图片...');
       location.reload();
